@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C90", "UP"]
+mccabe.max-complexity = 10

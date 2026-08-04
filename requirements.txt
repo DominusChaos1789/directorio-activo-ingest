@@ -1,0 +1,6 @@
+# Runtime dependencies for src/main.py.
+# boto3/botocore are provided by the AWS Lambda Python runtime and are
+# intentionally NOT packaged here to keep the deployment zip small and
+# avoid shipping a boto3 version that conflicts with the runtime's own.
+# Everything else used by the handler (json, ssl, urllib, dataclasses,
+# datetime) is Python standard library.

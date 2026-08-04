@@ -1,0 +1,16 @@
+# Copiar a terraform.tfvars y completar con los valores reales del ambiente.
+# terraform.tfvars NO se commitea (ver .gitignore).
+
+stack_id    = "augusta-nexa-dev"
+environment = "dev"
+aws_region  = "us-east-1"
+
+landing_bucket_name = "augusta-nexa-dev-landing"
+
+# Subnets/SGs con ruta hacia la VPN S2S que llega a 10.32.4.82 (v-vsasocs01).
+vpc_subnet_ids         = ["subnet-xxxxxxxxxxxxxxxxx"]
+vpc_security_group_ids = ["sg-xxxxxxxxxxxxxxxxx"]
+
+tags = {
+  Owner = "equipo-datos"
+}
