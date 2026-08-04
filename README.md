@@ -1,0 +1,162 @@
+# directorio-activo-ingest
+
+Daily ingestion of the company's Active Directory (`directorio activo`) into
+the data lake. A scheduled Lambda calls an internal on-prem API and drops the
+raw JSON response into S3.
+
+## Architecture
+
+```
+EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
+        │
+        ▼
+  Lambda: <stack_id>-active-directory   (VPC-attached, routes over S2S VPN)
+        │
+        ├─ 1. GET token from SSM Parameter Store (SecureString)
+        ├─ 2. Sync token into DynamoDB cache/history table
+        ├─ 3. GET https://v-vsasocs01:8453/api/v2/users?domains=...
+        │        (on-prem host, reachable only via S2S VPN, 10.32.4.82)
+        └─ 4. PUT JSON to S3
+                 │
+                 ▼
+     s3://<landing_bucket>/funcionarios/directorio_activo/
+        directorio_activo_<UTC timestamp>.json
+
+  Failed async invocations -> SQS DLQ (<stack_id>-active-directory-dlq)
+```
+
+## File structure
+
+```
+.
+├── src/main.py            # Lambda handler (src.main.handler)
+├── tests/                 # pytest unit tests (moto-mocked AWS)
+├── versions.tf            # Terraform + provider requirements
+├── variables.tf           # Input variables
+├── locals.tf               # Computed names (stack_id-based)
+├── data.tf                 # Data sources + IAM policy documents
+├── iam.tf                  # Lambda execution role
+├── ssm.tf                  # SSM parameter (token placeholder)
+├── dynamodb.tf              # Token cache/history table
+├── lambda.tf                # Lambda function, log group, DLQ, packaging
+├── eventbridge.tf           # Daily schedule + Lambda permission
+├── outputs.tf
+└── terraform.tfvars.example
+```
+
+## Token lifecycle (SSM + DynamoDB)
+
+The API token has no automatic rotation — it expires roughly every 6 months
+and must be regenerated **manually** by whoever administers the AD export
+API. To keep that manual step lightweight while still having an audit trail:
+
+1. **SSM Parameter Store** (`aws_ssm_parameter.api_token`, SecureString) is
+   the single source of truth for the *current* token. Terraform creates the
+   parameter with a placeholder value and then **ignores changes to it**
+   (`lifecycle.ignore_changes = [value]`), so operators can update the real
+   value via CLI/console without Terraform ever seeing or overwriting it.
+2. On every invocation, the Lambda reads the current SSM value and compares
+   it against the latest item cached in **DynamoDB**
+   (`<stack_id>-active-directory-token-cache`). If it changed (i.e. someone
+   rotated it), the Lambda writes a new `ACTIVE` version and flips the
+   previous one to `SUPERSEDED` — old versions are never deleted, giving you
+   a full rotation history for audits.
+
+To rotate the token manually:
+
+```bash
+aws ssm put-parameter \
+  --name "/<stack_id>/active-directory/api-token" \
+  --type SecureString \
+  --value "<new-token>" \
+  --overwrite
+```
+
+The next scheduled run (or a manual `aws lambda invoke`) will pick it up and
+record the new version in DynamoDB automatically.
+
+## Schedule
+
+**05:00 COT** (Colombia Time, UTC-5) = **10:00 UTC**, daily.
+
+EventBridge cron expression: `cron(0 10 * * ? *)`
+
+> Colombia does not observe daylight saving time, so this offset is constant
+> year-round.
+
+## Networking prerequisite
+
+`v-vsasocs01` (the AD export API, port 8453) is an on-prem host reachable
+only through the site-to-site VPN — resolved IP `10.32.4.82`. DevOps already
+opened the Nexa firewall for that IP. For the Lambda to reach it:
+
+- It must be deployed **inside the VPC** (`vpc_subnet_ids` /
+  `vpc_security_group_ids`, both required variables — there is no default,
+  deploying without them would silently fail to reach the API).
+- The attached security group must allow **egress HTTPS to
+  10.32.4.82:8453**.
+- The subnets must have a route to the S2S VPN.
+
+## Deploying
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+# edit terraform.tfvars: stack_id, landing_bucket_name, vpc_subnet_ids, vpc_security_group_ids
+
+terraform init
+terraform plan
+terraform apply
+```
+
+After the first apply, set the real token (see [Token lifecycle](#token-lifecycle-ssm--dynamodb)
+above) — the placeholder value will not authenticate against the API.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests mock all AWS calls with `moto` (SSM/DynamoDB/S3) and mock the HTTP
+call to the AD API — no real AWS credentials or network access needed.
+
+## Resources created
+
+| Resource | Purpose |
+|---|---|
+| `aws_lambda_function` | Runs the ingestion (`src.main.handler`) |
+| `aws_iam_role` + inline policy | Least-privilege execution role (scoped S3 prefix, one SSM parameter, one DynamoDB table, log group, DLQ, VPC ENI mgmt) |
+| `aws_cloudwatch_log_group` | Lambda logs, retention configurable |
+| `aws_ssm_parameter` (SecureString) | Current API token (value managed outside Terraform) |
+| `aws_dynamodb_table` | Token version cache/history |
+| `aws_sqs_queue` (DLQ) | Captures failed async invocations |
+| `aws_cloudwatch_event_rule` + target | Daily 05:00 COT trigger |
+| `aws_lambda_permission` | Allows EventBridge to invoke the Lambda |
+| `data.aws_s3_bucket` | References the **existing** landing bucket (not created here) |
+
+## Security notes
+
+1. **No secrets in git or Terraform state values.** The API token is only
+   ever set manually in SSM; Terraform manages the parameter's existence,
+   not its value.
+2. IAM is least-privilege: S3 write access is scoped to
+   `<landing_bucket>/funcionarios/directorio_activo/*` only, SSM read is
+   scoped to the single token parameter ARN, DynamoDB access is scoped to
+   the one cache table.
+3. TLS verification is on by default (`api_tls_verify = true`); only
+   disable it if the internal CA truly isn't distributable to Lambda.
+4. This repository is public — no hostnames, tokens, cookies, or other
+   credentials from the original request were committed. `terraform.tfvars`
+   (which would contain real subnet/SG IDs) is gitignored.
+
+## Outputs
+
+| Name | Description |
+|---|---|
+| `lambda_function_name` / `lambda_function_arn` | The deployed function |
+| `lambda_role_arn` | Execution role ARN |
+| `token_parameter_name` | SSM parameter name to populate manually |
+| `token_cache_table_name` | DynamoDB history table name |
+| `dlq_url` | Dead-letter queue URL |
+| `eventbridge_rule_arn` | Schedule rule ARN |
