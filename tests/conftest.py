@@ -1,3 +1,4 @@
+import json
 import os
 
 import boto3
@@ -6,7 +7,14 @@ from moto import mock_aws
 
 TOKEN_TABLE_NAME = "test-directorio-activo-token-cache"
 TOKEN_PARAMETER_NAME = "/augusta-nexa-dev/active-directory/api-token"
+CONFIG_PARAMETER_NAME = "/augusta-nexa-dev/active-directory/api-config"
 S3_BUCKET_NAME = "augusta-nexa-dev-landing"
+
+DEFAULT_API_CONFIG = {
+    "s3_prefix": "funcionarios/directorio_activo",
+    "base_url": "https://v-vsasocs01:8453/api/v2/users",
+    "domains": ["ventasyservicios.net", "vys"],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -21,11 +29,9 @@ def aws_credentials():
 @pytest.fixture(autouse=True)
 def lambda_env(monkeypatch):
     monkeypatch.setenv("TOKEN_PARAMETER_NAME", TOKEN_PARAMETER_NAME)
+    monkeypatch.setenv("CONFIG_PARAMETER_NAME", CONFIG_PARAMETER_NAME)
     monkeypatch.setenv("TOKEN_CACHE_TABLE_NAME", TOKEN_TABLE_NAME)
     monkeypatch.setenv("S3_BUCKET", S3_BUCKET_NAME)
-    monkeypatch.setenv("S3_PREFIX", "funcionarios/directorio_activo")
-    monkeypatch.setenv("API_BASE_URL", "https://v-vsasocs01:8453/api/v2/users")
-    monkeypatch.setenv("API_DOMAINS", "ventasyservicios.net,vys")
 
 
 @pytest.fixture
@@ -59,6 +65,11 @@ def ssm_parameter(aws):
         Name=TOKEN_PARAMETER_NAME,
         Value="fake-token-for-tests-only",
         Type="SecureString",
+    )
+    client.put_parameter(
+        Name=CONFIG_PARAMETER_NAME,
+        Value=json.dumps(DEFAULT_API_CONFIG),
+        Type="String",
     )
     return client
 

@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -35,42 +35,71 @@ class TokenUnavailableError(RuntimeError):
     """El parametro SSM con el token no existe o esta vacio."""
 
 
+class ApiConfigError(RuntimeError):
+    """El parametro SSM de configuracion (s3_prefix/base_url/domains) falta o es invalido."""
+
+
 class ApiRequestError(RuntimeError):
     """La API del directorio activo respondio con error o no fue alcanzable."""
 
 
 @dataclass(frozen=True)
 class Config:
+    """Config fija por deploy: nombres de recursos AWS y knobs de infraestructura."""
+
     token_parameter_name: str
+    config_parameter_name: str
     token_cache_table_name: str
     s3_bucket: str
-    s3_prefix: str
-    api_base_url: str
-    api_domains: list[str] = field(default_factory=list)
     request_timeout_seconds: int = 30
     verify_tls: bool = True
     token_validity_days: int = DEFAULT_TOKEN_VALIDITY_DAYS
 
     @classmethod
     def from_env(cls) -> Config:
-        domains = [
-            domain.strip()
-            for domain in os.environ.get("API_DOMAINS", "ventasyservicios.net,vys").split(",")
-            if domain.strip()
-        ]
         return cls(
             token_parameter_name=os.environ["TOKEN_PARAMETER_NAME"],
+            config_parameter_name=os.environ["CONFIG_PARAMETER_NAME"],
             token_cache_table_name=os.environ["TOKEN_CACHE_TABLE_NAME"],
             s3_bucket=os.environ["S3_BUCKET"],
-            s3_prefix=os.environ.get("S3_PREFIX", "funcionarios/directorio_activo"),
-            api_base_url=os.environ.get("API_BASE_URL", "https://v-vsasocs01:8453/api/v2/users"),
-            api_domains=domains,
             request_timeout_seconds=int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "30")),
             verify_tls=os.environ.get("API_TLS_VERIFY", "true").lower() != "false",
             token_validity_days=int(
                 os.environ.get("TOKEN_VALIDITY_DAYS", str(DEFAULT_TOKEN_VALIDITY_DAYS))
             ),
         )
+
+
+@dataclass(frozen=True)
+class ApiConfig:
+    """Config operacional editable en SSM sin redeploy: s3_prefix/base_url/domains."""
+
+    s3_prefix: str
+    base_url: str
+    domains: list[str]
+
+
+def get_api_config(ssm_client: Any, parameter_name: str) -> ApiConfig:
+    """Lee y parsea el parametro SSM (String) con s3_prefix/base_url/domains."""
+    response = ssm_client.get_parameter(Name=parameter_name)
+    raw_value = response["Parameter"]["Value"]
+
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ApiConfigError(f"El parametro SSM '{parameter_name}' no es un JSON valido") from exc
+
+    try:
+        domains = list(parsed["domains"])
+        return ApiConfig(
+            s3_prefix=parsed["s3_prefix"],
+            base_url=parsed["base_url"],
+            domains=domains,
+        )
+    except (KeyError, TypeError) as exc:
+        raise ApiConfigError(
+            f"El parametro SSM '{parameter_name}' debe tener s3_prefix, base_url y domains"
+        ) from exc
 
 
 def get_current_token(ssm_client: Any, parameter_name: str) -> str:
@@ -217,19 +246,20 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
     s3_client = boto3.client("s3")
     token_table = dynamodb.Table(config.token_cache_table_name)
 
+    api_config = get_api_config(ssm_client, config.config_parameter_name)
     token = get_current_token(ssm_client, config.token_parameter_name)
     sync_token_cache(token_table, token, config.token_validity_days)
 
     payload = fetch_directorio_activo(
-        config.api_base_url,
-        config.api_domains,
+        api_config.base_url,
+        api_config.domains,
         token,
         config.request_timeout_seconds,
         config.verify_tls,
     )
 
     now = datetime.now(UTC)
-    key = build_s3_key(config.s3_prefix, now)
+    key = build_s3_key(api_config.s3_prefix, now)
     upload_to_s3(s3_client, config.s3_bucket, key, payload)
 
     record_count = count_records(payload)

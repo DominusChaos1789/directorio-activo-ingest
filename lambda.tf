@@ -62,11 +62,9 @@ resource "aws_lambda_function" "directorio_activo" {
   environment {
     variables = {
       TOKEN_PARAMETER_NAME    = aws_ssm_parameter.api_token.name
+      CONFIG_PARAMETER_NAME   = aws_ssm_parameter.api_config.name
       TOKEN_CACHE_TABLE_NAME  = aws_dynamodb_table.token_cache.name
       S3_BUCKET               = data.aws_s3_bucket.landing.bucket
-      S3_PREFIX               = var.s3_prefix
-      API_BASE_URL            = var.api_base_url
-      API_DOMAINS             = join(",", var.api_domains)
       REQUEST_TIMEOUT_SECONDS = tostring(var.api_request_timeout_seconds)
       API_TLS_VERIFY          = tostring(var.api_tls_verify)
       TOKEN_VALIDITY_DAYS     = tostring(var.token_validity_days)

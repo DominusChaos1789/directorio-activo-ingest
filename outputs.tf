@@ -22,6 +22,11 @@ output "token_parameter_name" {
   value       = aws_ssm_parameter.api_token.name
 }
 
+output "config_parameter_name" {
+  description = "Nombre del parametro SSM (String, no sensible) con s3_prefix/base_url/domains. Editable manualmente sin redeploy."
+  value       = aws_ssm_parameter.api_config.name
+}
+
 output "token_cache_table_name" {
   description = "Nombre de la tabla DynamoDB con el historial de versiones del token."
   value       = aws_dynamodb_table.token_cache.name

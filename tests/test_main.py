@@ -6,6 +6,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from src.main import (
+    ApiConfigError,
     ApiRequestError,
     Config,
     TokenUnavailableError,
@@ -13,6 +14,7 @@ from src.main import (
     build_s3_key,
     count_records,
     fetch_directorio_activo,
+    get_api_config,
     get_current_token,
     handler,
     sync_token_cache,
@@ -25,13 +27,53 @@ FAKE_TOKEN = "fake-token-for-tests-only"
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-def test_config_from_env_parses_domains_and_defaults():
+def test_config_from_env_reads_resource_names_and_defaults():
     config = Config.from_env()
 
-    assert config.api_domains == ["ventasyservicios.net", "vys"]
-    assert config.s3_prefix == "funcionarios/directorio_activo"
+    assert config.token_parameter_name == "/augusta-nexa-dev/active-directory/api-token"
+    assert config.config_parameter_name == "/augusta-nexa-dev/active-directory/api-config"
     assert config.verify_tls is True
     assert config.token_validity_days == 180
+
+
+# ---------------------------------------------------------------------------
+# get_api_config
+# ---------------------------------------------------------------------------
+def test_get_api_config_parses_json():
+    ssm_client = MagicMock()
+    ssm_client.get_parameter.return_value = {
+        "Parameter": {
+            "Value": json.dumps(
+                {
+                    "s3_prefix": "funcionarios/directorio_activo",
+                    "base_url": "https://v-vsasocs01:8453/api/v2/users",
+                    "domains": ["ventasyservicios.net", "vys"],
+                }
+            )
+        }
+    }
+
+    config = get_api_config(ssm_client, "/some/config")
+
+    assert config.s3_prefix == "funcionarios/directorio_activo"
+    assert config.base_url == "https://v-vsasocs01:8453/api/v2/users"
+    assert config.domains == ["ventasyservicios.net", "vys"]
+
+
+def test_get_api_config_raises_on_invalid_json():
+    ssm_client = MagicMock()
+    ssm_client.get_parameter.return_value = {"Parameter": {"Value": "not-json"}}
+
+    with pytest.raises(ApiConfigError):
+        get_api_config(ssm_client, "/some/config")
+
+
+def test_get_api_config_raises_on_missing_keys():
+    ssm_client = MagicMock()
+    ssm_client.get_parameter.return_value = {"Parameter": {"Value": json.dumps({"s3_prefix": "x"})}}
+
+    with pytest.raises(ApiConfigError):
+        get_api_config(ssm_client, "/some/config")
 
 
 # ---------------------------------------------------------------------------

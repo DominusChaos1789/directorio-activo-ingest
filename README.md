@@ -13,10 +13,11 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
   Lambda: <stack_id>-active-directory   (VPC-attached, routes over S2S VPN)
         │
         ├─ 1. GET token from SSM Parameter Store (SecureString)
-        ├─ 2. Sync token into DynamoDB cache/history table
-        ├─ 3. GET https://v-vsasocs01:8453/api/v2/users?domains=...
+        ├─ 2. GET api-config from SSM Parameter Store (String, JSON)
+        ├─ 3. Sync token into DynamoDB cache/history table
+        ├─ 4. GET <base_url>?domains=<domains>  (from api-config)
         │        (on-prem host, reachable only via S2S VPN, 10.32.4.82)
-        └─ 4. PUT JSON to S3
+        └─ 5. PUT JSON to S3
                  │
                  ▼
      s3://<landing_bucket>/funcionarios/directorio_activo/
@@ -36,7 +37,7 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
 ├── locals.tf               # Computed names (stack_id-based)
 ├── data.tf                 # Data sources + IAM policy documents
 ├── iam.tf                  # Lambda execution role
-├── ssm.tf                  # SSM parameter (token placeholder)
+├── ssm.tf                  # SSM parameters (token + config)
 ├── dynamodb.tf              # Token cache/history table
 ├── lambda.tf                # Lambda function, log group, DLQ, packaging
 ├── eventbridge.tf           # Daily schedule + Lambda permission
@@ -44,23 +45,25 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
 └── terraform.tfvars.example
 ```
 
-## Token lifecycle (SSM + DynamoDB)
+## SSM parameters
+
+Two parameters, split by sensitivity — both seeded by Terraform once and then
+**ignored on subsequent applies** (`lifecycle.ignore_changes = [value]`), so
+operators can edit either one directly without a redeploy or Terraform
+reverting the change.
+
+### Token — `/<stack_id>/active-directory/api-token` (SecureString)
 
 The API token has no automatic rotation — it expires roughly every 6 months
 and must be regenerated **manually** by whoever administers the AD export
-API. To keep that manual step lightweight while still having an audit trail:
+API. This parameter is the single source of truth for the *current* token.
 
-1. **SSM Parameter Store** (`aws_ssm_parameter.api_token`, SecureString) is
-   the single source of truth for the *current* token. Terraform creates the
-   parameter with a placeholder value and then **ignores changes to it**
-   (`lifecycle.ignore_changes = [value]`), so operators can update the real
-   value via CLI/console without Terraform ever seeing or overwriting it.
-2. On every invocation, the Lambda reads the current SSM value and compares
-   it against the latest item cached in **DynamoDB**
-   (`<stack_id>-active-directory-token-cache`). If it changed (i.e. someone
-   rotated it), the Lambda writes a new `ACTIVE` version and flips the
-   previous one to `SUPERSEDED` — old versions are never deleted, giving you
-   a full rotation history for audits.
+On every invocation, the Lambda reads the current SSM value and compares it
+against the latest item cached in **DynamoDB**
+(`<stack_id>-active-directory-token-cache`). If it changed (i.e. someone
+rotated it), the Lambda writes a new `ACTIVE` version and flips the previous
+one to `SUPERSEDED` — old versions are never deleted, giving you a full
+rotation history for audits.
 
 To rotate the token manually:
 
@@ -74,6 +77,34 @@ aws ssm put-parameter \
 
 The next scheduled run (or a manual `aws lambda invoke`) will pick it up and
 record the new version in DynamoDB automatically.
+
+### Config — `/<stack_id>/active-directory/api-config` (String, not secret)
+
+Holds the operational, non-sensitive bits the Lambda needs — nothing here is
+a credential, so it's a plain `String` parameter, not `SecureString`:
+
+```json
+{
+  "s3_prefix": "funcionarios/directorio_activo",
+  "base_url": "https://v-vsasocs01:8453/api/v2/users",
+  "domains": ["ventasyservicios.net", "vys"]
+}
+```
+
+To change the base URL, domains, or S3 prefix without touching Terraform or
+the secret:
+
+```bash
+aws ssm put-parameter \
+  --name "/<stack_id>/active-directory/api-config" \
+  --type String \
+  --value '{"s3_prefix":"funcionarios/directorio_activo","base_url":"https://v-vsasocs01:8453/api/v2/users","domains":["ventasyservicios.net","vys"]}' \
+  --overwrite
+```
+
+The Lambda reads and parses this on every invocation; malformed JSON or
+missing keys fail the run loudly (`ApiConfigError`) rather than silently
+falling back to stale values.
 
 ## Schedule
 
@@ -108,7 +139,7 @@ terraform plan
 terraform apply
 ```
 
-After the first apply, set the real token (see [Token lifecycle](#token-lifecycle-ssm--dynamodb)
+After the first apply, set the real token (see [SSM parameters](#ssm-parameters)
 above) — the placeholder value will not authenticate against the API.
 
 ## Testing
@@ -128,7 +159,8 @@ call to the AD API — no real AWS credentials or network access needed.
 | `aws_lambda_function` | Runs the ingestion (`src.main.handler`) |
 | `aws_iam_role` + inline policy | Least-privilege execution role (scoped S3 prefix, one SSM parameter, one DynamoDB table, log group, DLQ, VPC ENI mgmt) |
 | `aws_cloudwatch_log_group` | Lambda logs, retention configurable |
-| `aws_ssm_parameter` (SecureString) | Current API token (value managed outside Terraform) |
+| `aws_ssm_parameter.api_token` (SecureString) | Current API token (value managed outside Terraform) |
+| `aws_ssm_parameter.api_config` (String) | s3_prefix/base_url/domains as JSON (value managed outside Terraform) |
 | `aws_dynamodb_table` | Token version cache/history |
 | `aws_sqs_queue` (DLQ) | Captures failed async invocations |
 | `aws_cloudwatch_event_rule` + target | Daily 05:00 COT trigger |
@@ -142,8 +174,8 @@ call to the AD API — no real AWS credentials or network access needed.
    not its value.
 2. IAM is least-privilege: S3 write access is scoped to
    `<landing_bucket>/funcionarios/directorio_activo/*` only, SSM read is
-   scoped to the single token parameter ARN, DynamoDB access is scoped to
-   the one cache table.
+   scoped to just the two parameter ARNs (token + config), DynamoDB access
+   is scoped to the one cache table.
 3. TLS verification is on by default (`api_tls_verify = true`); only
    disable it if the internal CA truly isn't distributable to Lambda.
 4. This repository is public — no hostnames, tokens, cookies, or other
@@ -157,6 +189,7 @@ call to the AD API — no real AWS credentials or network access needed.
 | `lambda_function_name` / `lambda_function_arn` | The deployed function |
 | `lambda_role_arn` | Execution role ARN |
 | `token_parameter_name` | SSM parameter name to populate manually |
+| `config_parameter_name` | SSM parameter name for s3_prefix/base_url/domains |
 | `token_cache_table_name` | DynamoDB history table name |
 | `dlq_url` | Dead-letter queue URL |
 | `eventbridge_rule_arn` | Schedule rule ARN |

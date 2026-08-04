@@ -68,13 +68,14 @@ data "aws_iam_policy_document" "lambda_s3" {
 
 data "aws_iam_policy_document" "lambda_ssm" {
   statement {
-    sid    = "ReadApiToken"
+    sid    = "ReadApiTokenAndConfig"
     effect = "Allow"
     actions = [
       "ssm:GetParameter",
     ]
     resources = [
       "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.token_parameter_name}",
+      "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.config_parameter_name}",
     ]
   }
 }
