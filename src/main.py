@@ -239,6 +239,14 @@ def count_records(payload: Any) -> int | None:
 
 
 def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
+    event = event or {}
+    logger.info(
+        "Invocacion recibida: source=%s detail_type=%s id=%s",
+        event.get("source"),
+        event.get("detail-type"),
+        event.get("id"),
+    )
+
     config = Config.from_env()
 
     ssm_client = boto3.client("ssm")

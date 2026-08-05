@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
@@ -22,6 +23,7 @@ from src.main import (
 )
 
 FAKE_TOKEN = "fake-token-for-tests-only"
+EVENTS_DIR = Path(__file__).parent / "events"
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +266,13 @@ def test_handler_propagates_api_errors_without_writing_to_s3(token_table, ssm_pa
             handler({}, context=None)
 
     assert landing_bucket.list_objects_v2(Bucket="augusta-nexa-dev-landing").get("Contents") is None
+
+
+def test_handler_accepts_real_eventbridge_event_shape(token_table, ssm_parameter, landing_bucket):
+    scheduled_event = json.loads((EVENTS_DIR / "scheduled_event.json").read_text())
+    body = json.dumps({"users": []}).encode("utf-8")
+
+    with patch("src.main.urlopen", return_value=_mock_response(200, body)):
+        result = handler(scheduled_event, context=None)
+
+    assert result["record_count"] == 0

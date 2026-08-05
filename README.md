@@ -152,6 +152,40 @@ pytest
 Tests mock all AWS calls with `moto` (SSM/DynamoDB/S3) and mock the HTTP
 call to the AD API — no real AWS credentials or network access needed.
 
+## Testing in the AWS Console
+
+[`tests/events/scheduled_event.json`](tests/events/scheduled_event.json) is
+the same event shape EventBridge actually sends to trigger this Lambda (the
+handler ignores its contents — the invocation is schedule-driven, not
+payload-driven — but using the real shape catches anything that assumes
+the wrong event structure).
+
+1. Open the function in the Lambda console → **Test** tab.
+2. **Create new event** → template `hello-world` → name it e.g.
+   `scheduled-event` → replace the body with the contents of
+   `tests/events/scheduled_event.json` → **Save**.
+3. Click **Test**.
+
+This is a real, unmocked invocation: it will read the actual SSM parameters,
+write to the actual DynamoDB table, call the real on-prem API, and write to
+the real S3 bucket. Before testing this way, make sure:
+
+- Terraform has been applied (function, role, table, and both SSM
+  parameters exist).
+- The real token has been set in `/<stack_id>/active-directory/api-token`
+  (see [SSM parameters](#ssm-parameters)) — the Terraform-seeded placeholder
+  will fail auth.
+- The function's VPC/subnets/security groups actually route to
+  `10.32.4.82:8453` (see [Networking prerequisite](#networking-prerequisite))
+  — otherwise the invocation will hang until `REQUEST_TIMEOUT_SECONDS` and
+  then fail with `ApiRequestError`.
+
+Check **CloudWatch Logs** (linked from the console's execution results) for
+the `Invocacion recibida: source=... detail_type=... id=...` line the
+handler logs on every run, followed by either the completion summary or the
+specific exception (`TokenUnavailableError`, `ApiConfigError`, or
+`ApiRequestError`) if something's misconfigured.
+
 ## Resources created
 
 | Resource | Purpose |

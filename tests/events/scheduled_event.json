@@ -1,0 +1,13 @@
+{
+  "version": "0",
+  "id": "17793124-05d4-b198-2fde-7ededc63b103",
+  "detail-type": "Scheduled Event",
+  "source": "aws.events",
+  "account": "123456789012",
+  "time": "2026-08-05T10:00:00Z",
+  "region": "us-east-1",
+  "resources": [
+    "arn:aws:events:us-east-1:123456789012:rule/augusta-nexa-dev-active-directory-schedule"
+  ],
+  "detail": {}
+}
