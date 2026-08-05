@@ -18,13 +18,13 @@ output "lambda_role_arn" {
 }
 
 output "token_parameter_name" {
-  description = "Nombre del parametro SSM que guarda el token. Cargar el valor real manualmente despues del primer apply."
-  value       = aws_ssm_parameter.api_token.name
+  description = "Ruta del parametro SSM (SecureString, pre-existente) que la Lambda lee para el token."
+  value       = local.token_parameter_name
 }
 
 output "config_parameter_name" {
-  description = "Nombre del parametro SSM (String, no sensible) con s3_prefix/base_url/domains. Editable manualmente sin redeploy."
-  value       = aws_ssm_parameter.api_config.name
+  description = "Ruta del parametro SSM (String, pre-existente) que la Lambda lee para s3_prefix/base_url/domains."
+  value       = local.config_parameter_name
 }
 
 output "token_cache_table_name" {

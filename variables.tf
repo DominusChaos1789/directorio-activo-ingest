@@ -28,26 +28,16 @@ variable "landing_bucket_name" {
 }
 
 variable "s3_prefix" {
-  description = "Prefijo dentro del landing bucket donde se escriben los JSON del directorio activo."
+  description = "Prefijo dentro del landing bucket donde se escriben los JSON del directorio activo. Debe coincidir con el 's3_prefix' del parametro SSM api-config: solo se usa aca para acotar el permiso IAM s3:PutObject, el valor real que usa la Lambda en runtime viene de SSM."
   type        = string
   default     = "funcionarios/directorio_activo"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API DEL DIRECTORIO ACTIVO
+# (base_url/domains ya NO se definen aca: viven en el parametro SSM
+# api-config, pre-existente. Ver locals.tf / ssm parameters en el README.)
 # ─────────────────────────────────────────────────────────────────────────────
-variable "api_base_url" {
-  description = "URL base de la API del directorio activo."
-  type        = string
-  default     = "https://v-vsasocs01:8453/api/v2/users"
-}
-
-variable "api_domains" {
-  description = "Dominios a consultar en la API (query param 'domains')."
-  type        = list(string)
-  default     = ["ventasyservicios.net", "vys"]
-}
-
 variable "api_request_timeout_seconds" {
   description = "Timeout (segundos) para el request HTTP a la API del directorio activo."
   type        = number

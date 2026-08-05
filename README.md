@@ -37,7 +37,6 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
 ├── locals.tf               # Computed names (stack_id-based)
 ├── data.tf                 # Data sources + IAM policy documents
 ├── iam.tf                  # Lambda execution role
-├── ssm.tf                  # SSM parameters (token + config)
 ├── dynamodb.tf              # Token cache/history table
 ├── lambda.tf                # Lambda function, log group, DLQ, packaging
 ├── eventbridge.tf           # Daily schedule + Lambda permission
@@ -47,10 +46,19 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
 
 ## SSM parameters
 
-Two parameters, split by sensitivity — both seeded by Terraform once and then
-**ignored on subsequent applies** (`lifecycle.ignore_changes = [value]`), so
-operators can edit either one directly without a redeploy or Terraform
-reverting the change.
+Both parameters already exist and are **not created or managed by this
+Terraform config** — they're provisioned externally. Terraform only computes
+their expected paths (`locals.tf`) to grant the Lambda's IAM role
+`ssm:GetParameter` on those two specific ARNs and to pass the paths in as
+Lambda environment variables. If a path or key changes on the external side,
+update `var.stack_id` (or the path pattern in `locals.tf` directly) to match
+— Terraform won't create anything and won't drift, since there's no resource
+here at all.
+
+Expected paths, given `stack_id = "augusta-nexa-dev"`:
+
+- `/augusta-nexa-dev/active-directory/api-token`
+- `/augusta-nexa-dev/active-directory/api-config`
 
 ### Token — `/<stack_id>/active-directory/api-token` (SecureString)
 
@@ -139,8 +147,13 @@ terraform plan
 terraform apply
 ```
 
-After the first apply, set the real token (see [SSM parameters](#ssm-parameters)
-above) — the placeholder value will not authenticate against the API.
+This assumes both SSM parameters already exist at the paths described in
+[SSM parameters](#ssm-parameters) above — Terraform doesn't create them, only
+grants the Lambda read access. If `terraform plan` shows the IAM policy ARNs
+pointing at paths that don't exist yet, create them out-of-band before
+`apply` (the Lambda will fail at runtime otherwise, not at plan/apply time —
+`ssm:GetParameter` permissions can be granted on a nonexistent parameter path
+without error).
 
 ## Testing
 
@@ -170,11 +183,9 @@ This is a real, unmocked invocation: it will read the actual SSM parameters,
 write to the actual DynamoDB table, call the real on-prem API, and write to
 the real S3 bucket. Before testing this way, make sure:
 
-- Terraform has been applied (function, role, table, and both SSM
-  parameters exist).
-- The real token has been set in `/<stack_id>/active-directory/api-token`
-  (see [SSM parameters](#ssm-parameters)) — the Terraform-seeded placeholder
-  will fail auth.
+- Terraform has been applied (function, role, table).
+- Both SSM parameters exist at the expected paths with real values (see
+  [SSM parameters](#ssm-parameters)) — they're managed outside this repo.
 - The function's VPC/subnets/security groups actually route to
   `10.32.4.82:8453` (see [Networking prerequisite](#networking-prerequisite))
   — otherwise the invocation will hang until `REQUEST_TIMEOUT_SECONDS` and
@@ -193,19 +204,22 @@ specific exception (`TokenUnavailableError`, `ApiConfigError`, or
 | `aws_lambda_function` | Runs the ingestion (`src.main.handler`) |
 | `aws_iam_role` + inline policy | Least-privilege execution role (scoped S3 prefix, one SSM parameter, one DynamoDB table, log group, DLQ, VPC ENI mgmt) |
 | `aws_cloudwatch_log_group` | Lambda logs, retention configurable |
-| `aws_ssm_parameter.api_token` (SecureString) | Current API token (value managed outside Terraform) |
-| `aws_ssm_parameter.api_config` (String) | s3_prefix/base_url/domains as JSON (value managed outside Terraform) |
 | `aws_dynamodb_table` | Token version cache/history |
 | `aws_sqs_queue` (DLQ) | Captures failed async invocations |
 | `aws_cloudwatch_event_rule` + target | Daily 05:00 COT trigger |
 | `aws_lambda_permission` | Allows EventBridge to invoke the Lambda |
 | `data.aws_s3_bucket` | References the **existing** landing bucket (not created here) |
 
+Not created here: the SSM parameters (`api-token`, `api-config`) and the
+landing bucket itself already exist — this config only reads/references
+them, it never manages their lifecycle.
+
 ## Security notes
 
-1. **No secrets in git or Terraform state values.** The API token is only
-   ever set manually in SSM; Terraform manages the parameter's existence,
-   not its value.
+1. **No secrets in git or Terraform state values.** The API token lives in a
+   pre-existing SSM parameter managed entirely outside this repo; Terraform
+   never creates, reads, or writes its value — it only grants the Lambda
+   role permission to read it at runtime.
 2. IAM is least-privilege: S3 write access is scoped to
    `<landing_bucket>/funcionarios/directorio_activo/*` only, SSM read is
    scoped to just the two parameter ARNs (token + config), DynamoDB access
@@ -222,8 +236,8 @@ specific exception (`TokenUnavailableError`, `ApiConfigError`, or
 |---|---|
 | `lambda_function_name` / `lambda_function_arn` | The deployed function |
 | `lambda_role_arn` | Execution role ARN |
-| `token_parameter_name` | SSM parameter name to populate manually |
-| `config_parameter_name` | SSM parameter name for s3_prefix/base_url/domains |
+| `token_parameter_name` | Expected path of the pre-existing token parameter |
+| `config_parameter_name` | Expected path of the pre-existing config parameter |
 | `token_cache_table_name` | DynamoDB history table name |
 | `dlq_url` | Dead-letter queue URL |
 | `eventbridge_rule_arn` | Schedule rule ARN |
