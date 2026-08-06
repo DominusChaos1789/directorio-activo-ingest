@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -179,7 +180,7 @@ def maybe_alert_token_expiry(
             Subject="Token del directorio activo por vencer",
             Message=message,
         )
-    except Exception:
+    except (BotoCoreError, ClientError):
         logger.exception("No se pudo publicar la alerta de expiracion del token en SNS")
 
     return True
@@ -208,6 +209,11 @@ def fetch_directorio_activo(
             "Authorization": token,
         },
     )
+    # verify_tls=False is a reviewed exception (SonarQube will flag this line as a
+    # Security Hotspot, S4830): v-vsasocs01 serves a self-signed cert with no CA
+    # distributable to Lambda, and this endpoint is only reachable over the
+    # private S2S VPN, never the public internet. See README "Networking
+    # prerequisite" / api_tls_verify.
     context = ssl.create_default_context() if verify_tls else ssl._create_unverified_context()
 
     try:

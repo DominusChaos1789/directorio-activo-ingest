@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import pytest
+from botocore.exceptions import ClientError
 
 from src.main import (
     ApiConfigError,
@@ -224,7 +225,9 @@ def test_maybe_alert_token_expiry_publishes_when_already_expired():
 
 def test_maybe_alert_token_expiry_swallows_publish_errors():
     sns_client = MagicMock()
-    sns_client.publish.side_effect = RuntimeError("SNS is down")
+    sns_client.publish.side_effect = ClientError(
+        {"Error": {"Code": "NotFound", "Message": "Topic does not exist"}}, "Publish"
+    )
     today = datetime(2026, 8, 6, tzinfo=UTC).date()
     expiration_date = today + timedelta(days=1)
 
