@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -87,12 +88,15 @@ def test_build_api_url_encodes_domains():
     assert url == "https://v-vsasocs01:8453/api/v2/users?domains=ventasyservicios.net%2Cvys"
 
 
-def test_build_s3_key_uses_prefix_and_timestamp():
+def test_build_s3_key_uses_hive_partitioning_and_timestamp():
     timestamp = datetime(2026, 8, 4, 10, 0, 0, tzinfo=UTC)
 
     key = build_s3_key("funcionarios/directorio_activo", timestamp)
 
-    assert key == "funcionarios/directorio_activo/directorio_activo_20260804T100000Z.json"
+    assert key == (
+        "funcionarios/directorio_activo/year=2026/month=08/day=04/"
+        "directorio_activo_20260804T100000Z.json"
+    )
 
 
 def test_build_s3_key_strips_trailing_slash_in_prefix():
@@ -100,7 +104,15 @@ def test_build_s3_key_strips_trailing_slash_in_prefix():
 
     key = build_s3_key("funcionarios/directorio_activo/", timestamp)
 
-    assert key.startswith("funcionarios/directorio_activo/directorio_activo_")
+    assert key.startswith("funcionarios/directorio_activo/year=2026/month=08/day=04/")
+
+
+def test_build_s3_key_zero_pads_single_digit_month_and_day():
+    timestamp = datetime(2026, 1, 5, 10, 0, 0, tzinfo=UTC)
+
+    key = build_s3_key("funcionarios/directorio_activo", timestamp)
+
+    assert "year=2026/month=01/day=05/" in key
 
 
 @pytest.mark.parametrize(
@@ -251,7 +263,10 @@ def test_handler_happy_path(token_table, ssm_parameter, landing_bucket):
 
     assert result["bucket"] == "augusta-nexa-dev-landing"
     assert result["record_count"] == 2
-    assert result["key"].startswith("funcionarios/directorio_activo/directorio_activo_")
+    assert result["key"].startswith("funcionarios/directorio_activo/year=")
+    assert "/month=" in result["key"]
+    assert "/day=" in result["key"]
+    assert re.search(r"/directorio_activo_\d{8}T\d{6}Z\.json$", result["key"])
 
     stored = landing_bucket.get_object(Bucket="augusta-nexa-dev-landing", Key=result["key"])
     assert json.loads(stored["Body"].read()) == {"users": [{"id": 1}, {"id": 2}]}

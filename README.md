@@ -21,7 +21,7 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
                  │
                  ▼
      s3://<landing_bucket>/funcionarios/directorio_activo/
-        directorio_activo_<UTC timestamp>.json
+        year=<YYYY>/month=<MM>/day=<DD>/directorio_activo_<UTC timestamp>.json
 
   Failed async invocations -> SQS DLQ (<stack_id>-active-directory-dlq)
 ```

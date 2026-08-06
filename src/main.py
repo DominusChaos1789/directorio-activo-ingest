@@ -216,8 +216,9 @@ def fetch_directorio_activo(
 
 
 def build_s3_key(prefix: str, timestamp: datetime) -> str:
+    partition = f"year={timestamp:%Y}/month={timestamp:%m}/day={timestamp:%d}"
     file_name = f"directorio_activo_{timestamp.strftime('%Y%m%dT%H%M%SZ')}.json"
-    return f"{prefix.rstrip('/')}/{file_name}"
+    return f"{prefix.rstrip('/')}/{partition}/{file_name}"
 
 
 def upload_to_s3(s3_client: Any, bucket: str, key: str, payload: Any) -> None:
