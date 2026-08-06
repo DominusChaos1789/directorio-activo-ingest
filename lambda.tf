@@ -61,13 +61,13 @@ resource "aws_lambda_function" "directorio_activo" {
 
   environment {
     variables = {
-      TOKEN_PARAMETER_NAME    = local.token_parameter_name
-      CONFIG_PARAMETER_NAME   = local.config_parameter_name
-      TOKEN_CACHE_TABLE_NAME  = aws_dynamodb_table.token_cache.name
-      S3_BUCKET               = data.aws_s3_bucket.landing.bucket
-      REQUEST_TIMEOUT_SECONDS = tostring(var.api_request_timeout_seconds)
-      API_TLS_VERIFY          = tostring(var.api_tls_verify)
-      TOKEN_VALIDITY_DAYS     = tostring(var.token_validity_days)
+      CONFIG_PARAMETER_NAME     = local.config_parameter_name
+      SECRET_NAME               = local.secret_name
+      S3_BUCKET                 = data.aws_s3_bucket.landing.bucket
+      ALERT_TOPIC_ARN           = aws_sns_topic.token_expiry.arn
+      REQUEST_TIMEOUT_SECONDS   = tostring(var.api_request_timeout_seconds)
+      API_TLS_VERIFY            = tostring(var.api_tls_verify)
+      TOKEN_EXPIRY_WARNING_DAYS = tostring(var.token_expiry_warning_days)
     }
   }
 

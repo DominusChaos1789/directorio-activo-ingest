@@ -17,19 +17,19 @@ output "lambda_role_arn" {
   value       = aws_iam_role.lambda_exec.arn
 }
 
-output "token_parameter_name" {
-  description = "Ruta del parametro SSM (SecureString, pre-existente) que la Lambda lee para el token."
-  value       = local.token_parameter_name
-}
-
 output "config_parameter_name" {
-  description = "Ruta del parametro SSM (String, pre-existente) que la Lambda lee para s3_prefix/base_url/domains."
+  description = "Ruta del parametro SSM (String, pre-existente) que la Lambda lee para base_path/base_url/domains."
   value       = local.config_parameter_name
 }
 
-output "token_cache_table_name" {
-  description = "Nombre de la tabla DynamoDB con el historial de versiones del token."
-  value       = aws_dynamodb_table.token_cache.name
+output "secret_name" {
+  description = "Nombre del secreto de Secrets Manager (pre-existente) con el token y su expiration_date."
+  value       = local.secret_name
+}
+
+output "alert_topic_arn" {
+  description = "ARN del topico SNS de alerta de expiracion del token. Suscribir un email/canal manualmente."
+  value       = aws_sns_topic.token_expiry.arn
 }
 
 output "dlq_url" {

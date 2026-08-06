@@ -61,38 +61,48 @@ data "aws_iam_policy_document" "lambda_s3" {
       "s3:PutObject",
     ]
     resources = [
-      "${data.aws_s3_bucket.landing.arn}/${var.s3_prefix}/*",
+      "${data.aws_s3_bucket.landing.arn}/${var.base_path}/*",
     ]
   }
 }
 
 data "aws_iam_policy_document" "lambda_ssm" {
   statement {
-    sid    = "ReadApiTokenAndConfig"
+    sid    = "ReadApiConfig"
     effect = "Allow"
     actions = [
       "ssm:GetParameter",
     ]
     resources = [
-      "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.token_parameter_name}",
       "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.config_parameter_name}",
     ]
   }
 }
 
-data "aws_iam_policy_document" "lambda_dynamodb" {
+# El nombre no incluye el sufijo random de 6 caracteres que Secrets Manager
+# agrega al ARN real; el wildcard final lo cubre sin tener que conocerlo.
+data "aws_iam_policy_document" "lambda_secrets" {
   statement {
-    sid    = "TokenCacheReadWrite"
+    sid    = "ReadTokenSecret"
     effect = "Allow"
     actions = [
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
-      "dynamodb:Query",
-      "dynamodb:Scan",
+      "secretsmanager:GetSecretValue",
     ]
     resources = [
-      aws_dynamodb_table.token_cache.arn,
+      "arn:${data.aws_partition.current.partition}:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${local.secret_name}*",
+    ]
+  }
+}
+
+data "aws_iam_policy_document" "lambda_sns" {
+  statement {
+    sid    = "PublishTokenExpiryAlert"
+    effect = "Allow"
+    actions = [
+      "sns:Publish",
+    ]
+    resources = [
+      aws_sns_topic.token_expiry.arn,
     ]
   }
 }
@@ -130,7 +140,8 @@ data "aws_iam_policy_document" "lambda_combined" {
     data.aws_iam_policy_document.lambda_logs.json,
     data.aws_iam_policy_document.lambda_s3.json,
     data.aws_iam_policy_document.lambda_ssm.json,
-    data.aws_iam_policy_document.lambda_dynamodb.json,
+    data.aws_iam_policy_document.lambda_secrets.json,
+    data.aws_iam_policy_document.lambda_sns.json,
     data.aws_iam_policy_document.lambda_dlq.json,
     data.aws_iam_policy_document.lambda_vpc.json,
   ]

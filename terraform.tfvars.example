@@ -3,7 +3,7 @@
 
 stack_id    = "augusta-nexa-dev"
 environment = "dev"
-aws_region  = "us-east-1"
+aws_region  = "us-east-2"
 
 landing_bucket_name = "augusta-nexa-dev-landing"
 

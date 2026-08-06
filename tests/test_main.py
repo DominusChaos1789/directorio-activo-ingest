@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -17,14 +17,15 @@ from src.main import (
     count_records,
     fetch_directorio_activo,
     get_api_config,
-    get_current_token,
+    get_token_secret,
     handler,
-    sync_token_cache,
+    maybe_alert_token_expiry,
     upload_to_s3,
 )
 
 FAKE_TOKEN = "fake-token-for-tests-only"
 EVENTS_DIR = Path(__file__).parent / "events"
+ALERT_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:augusta-nexa-dev-active-directory-token-expiry"
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +34,11 @@ EVENTS_DIR = Path(__file__).parent / "events"
 def test_config_from_env_reads_resource_names_and_defaults():
     config = Config.from_env()
 
-    assert config.token_parameter_name == "/augusta-nexa-dev/active-directory/api-token"
-    assert config.config_parameter_name == "/augusta-nexa-dev/active-directory/api-config"
+    assert config.config_parameter_name == "/augusta-nexa-dev/active-directory/config"
+    assert config.secret_name == "/augusta-nexa-dev/active-directory/credentials"
+    assert config.alert_topic_arn == ALERT_TOPIC_ARN
     assert config.verify_tls is True
-    assert config.token_validity_days == 180
+    assert config.token_expiry_warning_days == 10
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +50,8 @@ def test_get_api_config_parses_json():
         "Parameter": {
             "Value": json.dumps(
                 {
-                    "s3_prefix": "funcionarios/directorio_activo",
-                    "base_url": "https://v-vsasocs01:8453/api/v2/users",
+                    "base_path": "funcionarios/directorio_activo",
+                    "base_url": "https://10.32.4.58:8453/api/v2/users",
                     "domains": ["ventasyservicios.net", "vys"],
                 }
             )
@@ -58,8 +60,8 @@ def test_get_api_config_parses_json():
 
     config = get_api_config(ssm_client, "/some/config")
 
-    assert config.s3_prefix == "funcionarios/directorio_activo"
-    assert config.base_url == "https://v-vsasocs01:8453/api/v2/users"
+    assert config.base_path == "funcionarios/directorio_activo"
+    assert config.base_url == "https://10.32.4.58:8453/api/v2/users"
     assert config.domains == ["ventasyservicios.net", "vys"]
 
 
@@ -73,7 +75,7 @@ def test_get_api_config_raises_on_invalid_json():
 
 def test_get_api_config_raises_on_missing_keys():
     ssm_client = MagicMock()
-    ssm_client.get_parameter.return_value = {"Parameter": {"Value": json.dumps({"s3_prefix": "x"})}}
+    ssm_client.get_parameter.return_value = {"Parameter": {"Value": json.dumps({"base_path": "x"})}}
 
     with pytest.raises(ApiConfigError):
         get_api_config(ssm_client, "/some/config")
@@ -129,58 +131,106 @@ def test_count_records(payload, expected):
 
 
 # ---------------------------------------------------------------------------
-# get_current_token
+# get_token_secret
 # ---------------------------------------------------------------------------
-def test_get_current_token_returns_stripped_value():
-    ssm_client = MagicMock()
-    ssm_client.get_parameter.return_value = {"Parameter": {"Value": f"  {FAKE_TOKEN}  "}}
+def test_get_token_secret_parses_token_and_expiration():
+    secrets_client = MagicMock()
+    secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({"api-token": FAKE_TOKEN, "expiration_date": "2026-10-31"})
+    }
 
-    token = get_current_token(ssm_client, "/some/param")
+    secret = get_token_secret(secrets_client, "/some/secret")
 
-    assert token == FAKE_TOKEN
-    ssm_client.get_parameter.assert_called_once_with(Name="/some/param", WithDecryption=True)
+    assert secret.token == FAKE_TOKEN
+    assert secret.expiration_date.isoformat() == "2026-10-31"
 
 
-def test_get_current_token_raises_when_empty():
-    ssm_client = MagicMock()
-    ssm_client.get_parameter.return_value = {"Parameter": {"Value": "   "}}
+def test_get_token_secret_raises_on_invalid_json():
+    secrets_client = MagicMock()
+    secrets_client.get_secret_value.return_value = {"SecretString": "not-json"}
 
     with pytest.raises(TokenUnavailableError):
-        get_current_token(ssm_client, "/some/param")
+        get_token_secret(secrets_client, "/some/secret")
+
+
+def test_get_token_secret_raises_when_token_missing():
+    secrets_client = MagicMock()
+    secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({"expiration_date": "2026-10-31"})
+    }
+
+    with pytest.raises(TokenUnavailableError):
+        get_token_secret(secrets_client, "/some/secret")
+
+
+def test_get_token_secret_raises_when_expiration_missing():
+    secrets_client = MagicMock()
+    secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({"api-token": FAKE_TOKEN})
+    }
+
+    with pytest.raises(TokenUnavailableError):
+        get_token_secret(secrets_client, "/some/secret")
+
+
+def test_get_token_secret_raises_on_invalid_expiration_format():
+    secrets_client = MagicMock()
+    secrets_client.get_secret_value.return_value = {
+        "SecretString": json.dumps({"api-token": FAKE_TOKEN, "expiration_date": "10/31/2026"})
+    }
+
+    with pytest.raises(TokenUnavailableError):
+        get_token_secret(secrets_client, "/some/secret")
 
 
 # ---------------------------------------------------------------------------
-# sync_token_cache (DynamoDB via moto)
+# maybe_alert_token_expiry
 # ---------------------------------------------------------------------------
-def test_sync_token_cache_creates_first_version(token_table):
-    item = sync_token_cache(token_table, FAKE_TOKEN)
+def test_maybe_alert_token_expiry_does_nothing_when_far_from_expiry():
+    sns_client = MagicMock()
+    today = datetime(2026, 8, 6, tzinfo=UTC).date()
+    expiration_date = today + timedelta(days=30)
 
-    assert item["version"] == 1
-    assert item["status"] == "ACTIVE"
-    assert item["token_value"] == FAKE_TOKEN
+    alerted = maybe_alert_token_expiry(sns_client, ALERT_TOPIC_ARN, expiration_date, 10, today=today)
 
-
-def test_sync_token_cache_is_noop_when_token_unchanged(token_table):
-    first = sync_token_cache(token_table, FAKE_TOKEN)
-    second = sync_token_cache(token_table, FAKE_TOKEN)
-
-    assert first["version"] == second["version"] == 1
-    stored_items = token_table.scan()["Items"]
-    assert len(stored_items) == 1
+    assert alerted is False
+    sns_client.publish.assert_not_called()
 
 
-def test_sync_token_cache_adds_new_version_and_supersedes_previous(token_table):
-    sync_token_cache(token_table, "old-token")
-    new_item = sync_token_cache(token_table, "rotated-token")
+def test_maybe_alert_token_expiry_publishes_at_the_warning_threshold():
+    sns_client = MagicMock()
+    today = datetime(2026, 8, 6, tzinfo=UTC).date()
+    expiration_date = today + timedelta(days=10)
 
-    assert new_item["version"] == 2
-    assert new_item["status"] == "ACTIVE"
+    alerted = maybe_alert_token_expiry(sns_client, ALERT_TOPIC_ARN, expiration_date, 10, today=today)
 
-    old_item = token_table.get_item(Key={"token_scope": "directorio_activo", "version": 1})["Item"]
-    assert old_item["status"] == "SUPERSEDED"
+    assert alerted is True
+    sns_client.publish.assert_called_once()
+    message = sns_client.publish.call_args.kwargs["Message"]
+    assert "vence en 10 dia" in message
 
-    stored_items = token_table.scan()["Items"]
-    assert len(stored_items) == 2
+
+def test_maybe_alert_token_expiry_publishes_when_already_expired():
+    sns_client = MagicMock()
+    today = datetime(2026, 8, 6, tzinfo=UTC).date()
+    expiration_date = today - timedelta(days=3)
+
+    alerted = maybe_alert_token_expiry(sns_client, ALERT_TOPIC_ARN, expiration_date, 10, today=today)
+
+    assert alerted is True
+    message = sns_client.publish.call_args.kwargs["Message"]
+    assert "VENCIO" in message
+
+
+def test_maybe_alert_token_expiry_swallows_publish_errors():
+    sns_client = MagicMock()
+    sns_client.publish.side_effect = RuntimeError("SNS is down")
+    today = datetime(2026, 8, 6, tzinfo=UTC).date()
+    expiration_date = today + timedelta(days=1)
+
+    alerted = maybe_alert_token_expiry(sns_client, ALERT_TOPIC_ARN, expiration_date, 10, today=today)
+
+    assert alerted is True
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +305,7 @@ def test_upload_to_s3_writes_expected_key_and_body(landing_bucket):
 # ---------------------------------------------------------------------------
 # handler (end-to-end, all AWS services mocked via moto + urlopen patched)
 # ---------------------------------------------------------------------------
-def test_handler_happy_path(token_table, ssm_parameter, landing_bucket):
+def test_handler_happy_path(ssm_config_parameter, token_secret, landing_bucket):
     body = json.dumps({"users": [{"id": 1}, {"id": 2}]}).encode("utf-8")
 
     with patch("src.main.urlopen", return_value=_mock_response(200, body)):
@@ -263,6 +313,7 @@ def test_handler_happy_path(token_table, ssm_parameter, landing_bucket):
 
     assert result["bucket"] == "augusta-nexa-dev-landing"
     assert result["record_count"] == 2
+    assert result["token_expiration_date"] == "2026-10-31"
     assert result["key"].startswith("funcionarios/directorio_activo/year=")
     assert "/month=" in result["key"]
     assert "/day=" in result["key"]
@@ -271,12 +322,10 @@ def test_handler_happy_path(token_table, ssm_parameter, landing_bucket):
     stored = landing_bucket.get_object(Bucket="augusta-nexa-dev-landing", Key=result["key"])
     assert json.loads(stored["Body"].read()) == {"users": [{"id": 1}, {"id": 2}]}
 
-    cached_items = token_table.scan()["Items"]
-    assert len(cached_items) == 1
-    assert cached_items[0]["status"] == "ACTIVE"
 
-
-def test_handler_propagates_api_errors_without_writing_to_s3(token_table, ssm_parameter, landing_bucket):
+def test_handler_propagates_api_errors_without_writing_to_s3(
+    ssm_config_parameter, token_secret, landing_bucket
+):
     with patch("src.main.urlopen", side_effect=URLError("timeout")):
         with pytest.raises(ApiRequestError):
             handler({}, context=None)
@@ -284,11 +333,27 @@ def test_handler_propagates_api_errors_without_writing_to_s3(token_table, ssm_pa
     assert landing_bucket.list_objects_v2(Bucket="augusta-nexa-dev-landing").get("Contents") is None
 
 
-def test_handler_accepts_real_eventbridge_event_shape(token_table, ssm_parameter, landing_bucket):
+def test_handler_accepts_real_eventbridge_event_shape(ssm_config_parameter, token_secret, landing_bucket):
     scheduled_event = json.loads((EVENTS_DIR / "scheduled_event.json").read_text())
     body = json.dumps({"users": []}).encode("utf-8")
 
     with patch("src.main.urlopen", return_value=_mock_response(200, body)):
         result = handler(scheduled_event, context=None)
+
+    assert result["record_count"] == 0
+
+
+def test_handler_publishes_alert_when_token_near_expiry(
+    ssm_config_parameter, token_secret_factory, sns_topic, landing_bucket
+):
+    _sns_client, topic_arn = sns_topic
+    assert topic_arn == ALERT_TOPIC_ARN
+
+    near_expiry = (datetime.now(UTC).date() + timedelta(days=5)).isoformat()
+    token_secret_factory(expiration_date=near_expiry)
+
+    body = json.dumps({"users": []}).encode("utf-8")
+    with patch("src.main.urlopen", return_value=_mock_response(200, body)):
+        result = handler({}, context=None)
 
     assert result["record_count"] == 0

@@ -27,16 +27,16 @@ variable "landing_bucket_name" {
   type        = string
 }
 
-variable "s3_prefix" {
-  description = "Prefijo dentro del landing bucket donde se escriben los JSON del directorio activo. Debe coincidir con el 's3_prefix' del parametro SSM api-config: solo se usa aca para acotar el permiso IAM s3:PutObject, el valor real que usa la Lambda en runtime viene de SSM."
+variable "base_path" {
+  description = "Prefijo dentro del landing bucket donde se escriben los JSON del directorio activo. Debe coincidir con el 'base_path' del parametro SSM config: solo se usa aca para acotar el permiso IAM s3:PutObject, el valor real que usa la Lambda en runtime viene de SSM."
   type        = string
   default     = "funcionarios/directorio_activo"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API DEL DIRECTORIO ACTIVO
-# (base_url/domains ya NO se definen aca: viven en el parametro SSM
-# api-config, pre-existente. Ver locals.tf / ssm parameters en el README.)
+# (base_url/domains/base_path ya NO se definen aca: viven en el parametro
+# SSM config, pre-existente. Ver locals.tf / ssm parameters en el README.)
 # ─────────────────────────────────────────────────────────────────────────────
 variable "api_request_timeout_seconds" {
   description = "Timeout (segundos) para el request HTTP a la API del directorio activo."
@@ -51,12 +51,12 @@ variable "api_tls_verify" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TOKEN (SSM Parameter Store + cache/historial en DynamoDB)
+# TOKEN (Secrets Manager) + ALERTA DE EXPIRACION (SNS)
 # ─────────────────────────────────────────────────────────────────────────────
-variable "token_validity_days" {
-  description = "Vigencia esperada del token (dias). El token real se rota manualmente en SSM; este valor solo se usa para calcular expires_at en el historial de DynamoDB y emitir un warning en logs si se vence."
+variable "token_expiry_warning_days" {
+  description = "Dias antes de expiration_date (campo del secreto) en los que la Lambda empieza a publicar una alerta en SNS en cada corrida, hasta que se rote el token manualmente."
   type        = number
-  default     = 180
+  default     = 10
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

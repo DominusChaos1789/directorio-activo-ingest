@@ -1,12 +1,13 @@
 """Ingesta diaria del directorio activo (Active Directory) hacia S3.
 
-Flujo: SSM Parameter Store (token vigente) -> cache/historial en DynamoDB
--> API REST del directorio activo -> JSON crudo en
-s3://<landing_bucket>/funcionarios/directorio_activo/.
+Flujo: Secrets Manager (token + fecha de expiracion) + SSM Parameter Store
+(config no sensible: base_path/base_url/domains) -> API REST del directorio
+activo -> JSON crudo en s3://<landing_bucket>/<base_path>/.
 
-El token de la API se rota manualmente cada 6 meses en SSM (ver README).
-DynamoDB guarda cada version del token (activa y superseded) para
-trazabilidad/auditoria; nunca se borran versiones anteriores.
+El token no tiene rotacion automatica: se rota manualmente en Secrets
+Manager (ver README). Cuando faltan <= TOKEN_EXPIRY_WARNING_DAYS para que
+venza (segun el campo expiration_date del secreto), se publica una alerta
+en SNS en cada invocacion hasta que se rote.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import logging
 import os
 import ssl
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -27,16 +28,15 @@ import boto3
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
-TOKEN_SCOPE = "directorio_activo"
-DEFAULT_TOKEN_VALIDITY_DAYS = 180
+DEFAULT_TOKEN_EXPIRY_WARNING_DAYS = 10
 
 
 class TokenUnavailableError(RuntimeError):
-    """El parametro SSM con el token no existe o esta vacio."""
+    """El secreto de Secrets Manager no existe, esta vacio, o le falta un campo requerido."""
 
 
 class ApiConfigError(RuntimeError):
-    """El parametro SSM de configuracion (s3_prefix/base_url/domains) falta o es invalido."""
+    """El parametro SSM de configuracion (base_path/base_url/domains) falta o es invalido."""
 
 
 class ApiRequestError(RuntimeError):
@@ -45,42 +45,50 @@ class ApiRequestError(RuntimeError):
 
 @dataclass(frozen=True)
 class Config:
-    """Config fija por deploy: nombres de recursos AWS y knobs de infraestructura."""
+    """Config fija por deploy: nombres/ARNs de recursos AWS y knobs de infraestructura."""
 
-    token_parameter_name: str
     config_parameter_name: str
-    token_cache_table_name: str
+    secret_name: str
     s3_bucket: str
+    alert_topic_arn: str
     request_timeout_seconds: int = 30
     verify_tls: bool = True
-    token_validity_days: int = DEFAULT_TOKEN_VALIDITY_DAYS
+    token_expiry_warning_days: int = DEFAULT_TOKEN_EXPIRY_WARNING_DAYS
 
     @classmethod
     def from_env(cls) -> Config:
         return cls(
-            token_parameter_name=os.environ["TOKEN_PARAMETER_NAME"],
             config_parameter_name=os.environ["CONFIG_PARAMETER_NAME"],
-            token_cache_table_name=os.environ["TOKEN_CACHE_TABLE_NAME"],
+            secret_name=os.environ["SECRET_NAME"],
             s3_bucket=os.environ["S3_BUCKET"],
+            alert_topic_arn=os.environ["ALERT_TOPIC_ARN"],
             request_timeout_seconds=int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "30")),
             verify_tls=os.environ.get("API_TLS_VERIFY", "true").lower() != "false",
-            token_validity_days=int(
-                os.environ.get("TOKEN_VALIDITY_DAYS", str(DEFAULT_TOKEN_VALIDITY_DAYS))
+            token_expiry_warning_days=int(
+                os.environ.get("TOKEN_EXPIRY_WARNING_DAYS", str(DEFAULT_TOKEN_EXPIRY_WARNING_DAYS))
             ),
         )
 
 
 @dataclass(frozen=True)
 class ApiConfig:
-    """Config operacional editable en SSM sin redeploy: s3_prefix/base_url/domains."""
+    """Config operacional editable en SSM sin redeploy: base_path/base_url/domains."""
 
-    s3_prefix: str
+    base_path: str
     base_url: str
     domains: list[str]
 
 
+@dataclass(frozen=True)
+class TokenSecret:
+    """Token vigente + fecha de expiracion, leidos desde Secrets Manager."""
+
+    token: str
+    expiration_date: date
+
+
 def get_api_config(ssm_client: Any, parameter_name: str) -> ApiConfig:
-    """Lee y parsea el parametro SSM (String) con s3_prefix/base_url/domains."""
+    """Lee y parsea el parametro SSM (String) con base_path/base_url/domains."""
     response = ssm_client.get_parameter(Name=parameter_name)
     raw_value = response["Parameter"]["Value"]
 
@@ -92,84 +100,89 @@ def get_api_config(ssm_client: Any, parameter_name: str) -> ApiConfig:
     try:
         domains = list(parsed["domains"])
         return ApiConfig(
-            s3_prefix=parsed["s3_prefix"],
+            base_path=parsed["base_path"],
             base_url=parsed["base_url"],
             domains=domains,
         )
     except (KeyError, TypeError) as exc:
         raise ApiConfigError(
-            f"El parametro SSM '{parameter_name}' debe tener s3_prefix, base_url y domains"
+            f"El parametro SSM '{parameter_name}' debe tener base_path, base_url y domains"
         ) from exc
 
 
-def get_current_token(ssm_client: Any, parameter_name: str) -> str:
-    """Lee el token vigente desde SSM Parameter Store (SecureString)."""
-    response = ssm_client.get_parameter(Name=parameter_name, WithDecryption=True)
-    token = response["Parameter"]["Value"].strip()
-    if not token:
-        raise TokenUnavailableError(f"El parametro SSM '{parameter_name}' esta vacio")
-    return token
+def get_token_secret(secrets_client: Any, secret_name: str) -> TokenSecret:
+    """Lee el token y su fecha de expiracion desde Secrets Manager.
 
-
-def get_latest_cached_token(table: Any, scope: str = TOKEN_SCOPE) -> dict[str, Any] | None:
-    """Devuelve el item con la version mas alta cacheada para ese scope, o None."""
-    response = table.query(
-        KeyConditionExpression="token_scope = :scope",
-        ExpressionAttributeValues={":scope": scope},
-        ScanIndexForward=False,
-        Limit=1,
-    )
-    items = response.get("Items", [])
-    return items[0] if items else None
-
-
-def sync_token_cache(
-    table: Any,
-    current_token: str,
-    validity_days: int = DEFAULT_TOKEN_VALIDITY_DAYS,
-    scope: str = TOKEN_SCOPE,
-) -> dict[str, Any]:
-    """Sincroniza el token vigente (SSM) con el historial en DynamoDB.
-
-    Si el token no cambio desde la ultima corrida, no escribe nada.
-    Si cambio (rotacion manual en SSM), agrega una version nueva ACTIVE
-    y marca la anterior como SUPERSEDED, sin borrar historial.
+    El secreto es un JSON: {"api-token": "...", "expiration_date": "YYYY-MM-DD"}.
     """
-    latest = get_latest_cached_token(table, scope)
+    response = secrets_client.get_secret_value(SecretId=secret_name)
+    raw_value = response["SecretString"]
 
-    if latest is not None and latest["token_value"] == current_token:
-        if latest["expires_at"] < datetime.now(UTC).isoformat():
-            logger.warning(
-                "El token activo (version %s) supero su vigencia esperada (%s). "
-                "Verificar rotacion manual en SSM.",
-                latest["version"],
-                latest["expires_at"],
-            )
-        return latest
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise TokenUnavailableError(f"El secreto '{secret_name}' no es un JSON valido") from exc
 
-    now = datetime.now(UTC)
-    next_version = int(latest["version"]) + 1 if latest else 1
+    token = str(parsed.get("api-token") or "").strip()
+    if not token:
+        raise TokenUnavailableError(f"El secreto '{secret_name}' no tiene 'api-token'")
 
-    if latest is not None:
-        table.update_item(
-            Key={"token_scope": scope, "version": latest["version"]},
-            UpdateExpression="SET #status = :superseded",
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={":superseded": "SUPERSEDED"},
+    expiration_raw = parsed.get("expiration_date")
+    if not expiration_raw:
+        raise TokenUnavailableError(f"El secreto '{secret_name}' no tiene 'expiration_date'")
+
+    try:
+        expiration_date = date.fromisoformat(expiration_raw)
+    except ValueError as exc:
+        raise TokenUnavailableError(
+            f"El secreto '{secret_name}' tiene un 'expiration_date' invalido: {expiration_raw!r}"
+        ) from exc
+
+    return TokenSecret(token=token, expiration_date=expiration_date)
+
+
+def maybe_alert_token_expiry(
+    sns_client: Any,
+    topic_arn: str,
+    expiration_date: date,
+    warning_days: int,
+    today: date | None = None,
+) -> bool:
+    """Publica una alerta en SNS si al token le quedan <= warning_days (o ya vencio).
+
+    Es best-effort: si falla el publish, se loguea el error pero no se
+    interrumpe la ingesta (la alerta no es mas critica que el dato en si).
+    Devuelve True si se publico una alerta.
+    """
+    today = today or datetime.now(UTC).date()
+    days_left = (expiration_date - today).days
+
+    if days_left > warning_days:
+        return False
+
+    if days_left < 0:
+        message = (
+            f"El token de la API del directorio activo VENCIO hace {-days_left} dia(s) "
+            f"(vencio el {expiration_date.isoformat()}). Rotar manualmente en Secrets Manager."
+        )
+    else:
+        message = (
+            f"El token de la API del directorio activo vence en {days_left} dia(s) "
+            f"({expiration_date.isoformat()}). Rotar manualmente en Secrets Manager antes de esa fecha."
         )
 
-    new_item = {
-        "token_scope": scope,
-        "version": next_version,
-        "token_value": current_token,
-        "created_at": now.isoformat(),
-        "expires_at": (now + timedelta(days=validity_days)).isoformat(),
-        "status": "ACTIVE",
-        "source": "ssm",
-    }
-    table.put_item(Item=new_item)
-    logger.info("Nueva version de token cacheada en DynamoDB: version=%s", next_version)
-    return new_item
+    logger.warning(message)
+
+    try:
+        sns_client.publish(
+            TopicArn=topic_arn,
+            Subject="Token del directorio activo por vencer",
+            Message=message,
+        )
+    except Exception:
+        logger.exception("No se pudo publicar la alerta de expiracion del token en SNS")
+
+    return True
 
 
 def build_api_url(base_url: str, domains: list[str]) -> str:
@@ -252,24 +265,30 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
     config = Config.from_env()
 
     ssm_client = boto3.client("ssm")
-    dynamodb = boto3.resource("dynamodb")
+    secrets_client = boto3.client("secretsmanager")
+    sns_client = boto3.client("sns")
     s3_client = boto3.client("s3")
-    token_table = dynamodb.Table(config.token_cache_table_name)
 
     api_config = get_api_config(ssm_client, config.config_parameter_name)
-    token = get_current_token(ssm_client, config.token_parameter_name)
-    sync_token_cache(token_table, token, config.token_validity_days)
+    token_secret = get_token_secret(secrets_client, config.secret_name)
+
+    maybe_alert_token_expiry(
+        sns_client,
+        config.alert_topic_arn,
+        token_secret.expiration_date,
+        config.token_expiry_warning_days,
+    )
 
     payload = fetch_directorio_activo(
         api_config.base_url,
         api_config.domains,
-        token,
+        token_secret.token,
         config.request_timeout_seconds,
         config.verify_tls,
     )
 
     now = datetime.now(UTC)
-    key = build_s3_key(api_config.s3_prefix, now)
+    key = build_s3_key(api_config.base_path, now)
     upload_to_s3(s3_client, config.s3_bucket, key, payload)
 
     record_count = count_records(payload)
@@ -284,4 +303,5 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
         "bucket": config.s3_bucket,
         "key": key,
         "record_count": record_count,
+        "token_expiration_date": token_secret.expiration_date.isoformat(),
     }
