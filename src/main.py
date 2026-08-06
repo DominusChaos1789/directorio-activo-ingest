@@ -191,6 +191,7 @@ def fetch_directorio_activo(
         method="GET",
         headers={
             "Accept": "application/json",
+            "Host": "API",
             "Authorization": token,
         },
     )

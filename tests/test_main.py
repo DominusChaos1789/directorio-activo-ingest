@@ -196,6 +196,7 @@ def test_fetch_directorio_activo_returns_parsed_json():
     assert payload == {"users": [{"id": 1}]}
     request = mocked_urlopen.call_args.args[0]
     assert request.get_header("Authorization") == FAKE_TOKEN
+    assert request.get_header("Host") == "API"
 
 
 def test_fetch_directorio_activo_raises_on_http_error():
