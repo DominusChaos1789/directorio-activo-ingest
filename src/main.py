@@ -89,8 +89,8 @@ class TokenSecret:
 
 
 def get_api_config(ssm_client: Any, parameter_name: str) -> ApiConfig:
-    """Lee y parsea el parametro SSM (String) con base_path/base_url/domains."""
-    response = ssm_client.get_parameter(Name=parameter_name)
+    """Lee y parsea el parametro SSM (SecureString) con base_path/base_url/domains."""
+    response = ssm_client.get_parameter(Name=parameter_name, WithDecryption=True)
     raw_value = response["Parameter"]["Value"]
 
     try:

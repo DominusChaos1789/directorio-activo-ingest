@@ -48,7 +48,7 @@ def ssm_config_parameter(aws):
     client.put_parameter(
         Name=CONFIG_PARAMETER_NAME,
         Value=json.dumps(DEFAULT_API_CONFIG),
-        Type="String",
+        Type="SecureString",
     )
     return client
 

@@ -64,6 +64,7 @@ def test_get_api_config_parses_json():
     assert config.base_path == "funcionarios/directorio_activo"
     assert config.base_url == "https://10.32.4.58:8453/api/v2/users"
     assert config.domains == ["ventasyservicios.net", "vys"]
+    ssm_client.get_parameter.assert_called_once_with(Name="/some/config", WithDecryption=True)
 
 
 def test_get_api_config_raises_on_invalid_json():

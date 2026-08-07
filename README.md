@@ -12,7 +12,7 @@ EventBridge Rule (cron 10:00 UTC = 05:00 COT, daily)
         ▼
   Lambda: <stack_id>-active-directory   (VPC-attached, routes over S2S VPN)
         │
-        ├─ 1. GET config from SSM Parameter Store (String, JSON)
+        ├─ 1. GET config from SSM Parameter Store (SecureString, JSON)
         ├─ 2. GET token + expiration_date from Secrets Manager
         ├─ 3. If <= token_expiry_warning_days from expiring: publish to SNS
         ├─ 4. GET <base_url>?domains=<domains>  (from config)
@@ -53,9 +53,10 @@ access and to pass the paths in as environment variables. If a path changes
 on the external side, update `var.stack_id` (or the pattern in `locals.tf`
 directly) to match — there's no resource here to drift.
 
-### Config — `/<stack_id>/active-directory/config` (SSM Parameter, String, not secret)
+### Config — `/<stack_id>/active-directory/config` (SSM Parameter, SecureString)
 
-Holds the operational, non-sensitive bits the Lambda needs:
+Holds the operational bits the Lambda needs. It's a `SecureString`, so the
+Lambda reads it with `WithDecryption=True`:
 
 ```json
 {
@@ -71,7 +72,7 @@ the credential:
 ```bash
 aws ssm put-parameter \
   --name "/<stack_id>/active-directory/config" \
-  --type String \
+  --type SecureString \
   --value '{"base_path":"funcionarios/directorio_activo","base_url":"https://10.32.4.58:8453/api/v2/users","domains":["ventasyservicios.net","vys"]}' \
   --overwrite
 ```
