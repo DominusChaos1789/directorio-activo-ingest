@@ -8,6 +8,7 @@ from moto import mock_aws
 CONFIG_PARAMETER_NAME = "/augusta-nexa-dev/active-directory/config"
 SECRET_NAME = "/augusta-nexa-dev/active-directory/credentials"
 S3_BUCKET_NAME = "augusta-nexa-dev-landing"
+AWS_ACCOUNT_ID = "123456789012"
 ALERT_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:augusta-nexa-dev-active-directory-token-expiry"
 
 DEFAULT_API_CONFIG = {
@@ -33,6 +34,7 @@ def lambda_env(monkeypatch):
     monkeypatch.setenv("CONFIG_PARAMETER_NAME", CONFIG_PARAMETER_NAME)
     monkeypatch.setenv("SECRET_NAME", SECRET_NAME)
     monkeypatch.setenv("S3_BUCKET", S3_BUCKET_NAME)
+    monkeypatch.setenv("AWS_ACCOUNT_ID", AWS_ACCOUNT_ID)
     monkeypatch.setenv("ALERT_TOPIC_ARN", ALERT_TOPIC_ARN)
 
 

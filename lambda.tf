@@ -64,6 +64,7 @@ resource "aws_lambda_function" "directorio_activo" {
       CONFIG_PARAMETER_NAME     = local.config_parameter_name
       SECRET_NAME               = local.secret_name
       S3_BUCKET                 = data.aws_s3_bucket.landing.bucket
+      AWS_ACCOUNT_ID            = data.aws_caller_identity.current.account_id
       ALERT_TOPIC_ARN           = aws_sns_topic.token_expiry.arn
       REQUEST_TIMEOUT_SECONDS   = tostring(var.api_request_timeout_seconds)
       API_TLS_VERIFY            = tostring(var.api_tls_verify)

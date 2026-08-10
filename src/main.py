@@ -51,6 +51,7 @@ class Config:
     config_parameter_name: str
     secret_name: str
     s3_bucket: str
+    aws_account_id: str
     alert_topic_arn: str
     request_timeout_seconds: int = 30
     verify_tls: bool = True
@@ -62,6 +63,7 @@ class Config:
             config_parameter_name=os.environ["CONFIG_PARAMETER_NAME"],
             secret_name=os.environ["SECRET_NAME"],
             s3_bucket=os.environ["S3_BUCKET"],
+            aws_account_id=os.environ["AWS_ACCOUNT_ID"],
             alert_topic_arn=os.environ["ALERT_TOPIC_ARN"],
             request_timeout_seconds=int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "30")),
             verify_tls=os.environ.get("API_TLS_VERIFY", "true").lower() != "false",
@@ -240,12 +242,15 @@ def build_s3_key(prefix: str, timestamp: datetime) -> str:
     return f"{prefix.rstrip('/')}/{partition}/{file_name}"
 
 
-def upload_to_s3(s3_client: Any, bucket: str, key: str, payload: Any) -> None:
+def upload_to_s3(
+    s3_client: Any, bucket: str, key: str, payload: Any, expected_bucket_owner: str
+) -> None:
     s3_client.put_object(
         Bucket=bucket,
         Key=key,
         Body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json",
+        ExpectedBucketOwner=expected_bucket_owner,
     )
 
 
@@ -295,7 +300,7 @@ def handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
 
     now = datetime.now(UTC)
     key = build_s3_key(api_config.base_path, now)
-    upload_to_s3(s3_client, config.s3_bucket, key, payload)
+    upload_to_s3(s3_client, config.s3_bucket, key, payload, config.aws_account_id)
 
     record_count = count_records(payload)
     logger.info(

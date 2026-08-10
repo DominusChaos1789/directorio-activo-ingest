@@ -37,6 +37,7 @@ def test_config_from_env_reads_resource_names_and_defaults():
 
     assert config.config_parameter_name == "/augusta-nexa-dev/active-directory/config"
     assert config.secret_name == "/augusta-nexa-dev/active-directory/credentials"
+    assert config.aws_account_id == "123456789012"
     assert config.alert_topic_arn == ALERT_TOPIC_ARN
     assert config.verify_tls is True
     assert config.token_expiry_warning_days == 10
@@ -299,11 +300,19 @@ def test_upload_to_s3_writes_expected_key_and_body(landing_bucket):
     bucket = "augusta-nexa-dev-landing"
     key = "funcionarios/directorio_activo/f.json"
 
-    upload_to_s3(landing_bucket, bucket, key, {"a": 1})
+    upload_to_s3(landing_bucket, bucket, key, {"a": 1}, "123456789012")
 
     stored = landing_bucket.get_object(Bucket=bucket, Key=key)
     assert json.loads(stored["Body"].read()) == {"a": 1}
     assert stored["ContentType"] == "application/json"
+
+
+def test_upload_to_s3_passes_expected_bucket_owner():
+    s3_client = MagicMock()
+
+    upload_to_s3(s3_client, "some-bucket", "k.json", {"a": 1}, "123456789012")
+
+    assert s3_client.put_object.call_args.kwargs["ExpectedBucketOwner"] == "123456789012"
 
 
 # ---------------------------------------------------------------------------
