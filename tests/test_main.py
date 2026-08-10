@@ -1,5 +1,6 @@
 import json
 import re
+import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,7 @@ from src.main import (
     ApiRequestError,
     Config,
     TokenUnavailableError,
+    _build_tls_context,
     build_api_url,
     build_s3_key,
     count_records,
@@ -248,6 +250,22 @@ def _mock_response(status: int, body: bytes):
     response.__enter__.return_value = response
     response.__exit__.return_value = False
     return response
+
+
+def test_build_tls_context_verifies_by_default():
+    context = _build_tls_context(verify_tls=True)
+
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+
+
+def test_build_tls_context_disables_verification_when_requested():
+    context = _build_tls_context(verify_tls=False)
+
+    assert context.check_hostname is False
+    assert context.verify_mode == ssl.CERT_NONE
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
 def test_fetch_directorio_activo_returns_parsed_json():

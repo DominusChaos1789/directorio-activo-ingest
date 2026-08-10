@@ -193,6 +193,25 @@ def build_api_url(base_url: str, domains: list[str]) -> str:
     return f"{base_url}?{query}"
 
 
+def _build_tls_context(verify_tls: bool) -> ssl.SSLContext:
+    """Crea el SSLContext para el request, fijando TLS 1.2 como minimo.
+
+    Con verify_tls=False se desactivan la verificacion de certificado y de
+    hostname A PROPOSITO. Es una excepcion revisada y aceptada (SonarQube
+    S5527 "Enable server hostname verification" / S4830): el host sirve un
+    certificado self-signed sin CA distribuible a Lambda y solo es alcanzable
+    por la VPN S2S privada, nunca por internet. Ver README "Networking
+    prerequisite" / la variable api_tls_verify. Para eliminar el hallazgo,
+    importar el certificado como CA de confianza y dejar api_tls_verify=true.
+    """
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if not verify_tls:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def fetch_directorio_activo(
     base_url: str,
     domains: list[str],
@@ -211,12 +230,7 @@ def fetch_directorio_activo(
             "Authorization": token,
         },
     )
-    # verify_tls=False is a reviewed exception (SonarQube will flag this line as a
-    # Security Hotspot, S4830): v-vsasocs01 serves a self-signed cert with no CA
-    # distributable to Lambda, and this endpoint is only reachable over the
-    # private S2S VPN, never the public internet. See README "Networking
-    # prerequisite" / api_tls_verify.
-    context = ssl.create_default_context() if verify_tls else ssl._create_unverified_context()
+    context = _build_tls_context(verify_tls)
 
     try:
         with urlopen(request, timeout=timeout_seconds, context=context) as response:
